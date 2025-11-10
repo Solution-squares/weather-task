@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+    # PostgreSQL Database
+    postgres:
+        image: postgres:15-alpine
+        container_name: weather-postgres
+        environment:
+            POSTGRES_USER: ${POSTGRES_USER:-solutionsquare}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-weather_pass}
+            POSTGRES_DB: ${POSTGRES_DB:-weather_db}
+        ports:
+            - '${POSTGRES_PORT:-5432}:5432'
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+            - ./services/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+        healthcheck:
+            test:
+                [
+                    'CMD-SHELL',
+                    'pg_isready -U ${POSTGRES_USER:-solutionsquare} -d ${POSTGRES_DB:-weather_db}',
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+        networks:
+            - weather-network
+
+    # Redis Queue
+    redis:
+        image: redis:7-alpine
+        container_name: weather-redis
+        ports:
+            - '${REDIS_PORT:-6379}:6379'
+        volumes:
+            - redis_data:/data
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 10s
+            timeout: 5s
+            retries: 5
+        networks:
+            - weather-network
+
+    # Scheduler Service (Background Producer)
+    scheduler:
+        build:
+            context: ./services
+            dockerfile: scheduler/Dockerfile
+        container_name: weather-scheduler
+        environment:
+            - NODE_ENV=${NODE_ENV:-development}
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - POSTGRES_HOST=postgres
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=${POSTGRES_USER:-solutionsquare}
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-weather_pass}
+            - POSTGRES_DB=${POSTGRES_DB:-weather_db}
+            - WEATHER_API_KEY=${WEATHER_API_KEY}
+            - SCHEDULE_INTERVAL=${SCHEDULE_INTERVAL:-3600000}
+        depends_on:
+            redis:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+        networks:
+            - weather-network
+        restart: unless-stopped
+
+    # Worker Service (Consumer)
+    worker:
+        build:
+            context: ./services
+            dockerfile: worker/Dockerfile
+        container_name: weather-worker
+        environment:
+            - NODE_ENV=${NODE_ENV:-development}
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            - POSTGRES_HOST=postgres
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=${POSTGRES_USER:-solutionsquare}
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-weather_pass}
+            - POSTGRES_DB=${POSTGRES_DB:-weather_db}
+            - WEATHER_API_KEY=${WEATHER_API_KEY}
+            - SOCKET_PORT=${SOCKET_PORT:-3001}
+            - FRONTEND_URL=${FRONTEND_URL:-http://frontend:3000}
+        ports:
+            - '${SOCKET_PORT:-3001}:3001'
+        depends_on:
+            redis:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+        networks:
+            - weather-network
+        restart: unless-stopped
+
+    # Frontend (Next.js) - place your existing project under services/frontend
+    frontend:
+        build:
+            context: ./services
+            dockerfile: frontend/Dockerfile
+        container_name: weather-frontend
+        environment:
+            - NODE_ENV=${NODE_ENV:-development}
+            # Point the app to the worker socket inside the compose network
+            - NEXT_PUBLIC_SOCKET_URL=http://worker:3001
+            # Redis connection (using Docker service name)
+            - REDIS_HOST=redis
+            - REDIS_PORT=6379
+            # PostgreSQL connection (using Docker service name)
+            - POSTGRES_HOST=postgres
+            - POSTGRES_PORT=5432
+            - POSTGRES_USER=${POSTGRES_USER:-solutionsquare}
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-weather_pass}
+            - POSTGRES_DB=${POSTGRES_DB:-weather_db}
+        ports:
+            - '${FRONTEND_PORT:-3000}:3000'
+        depends_on:
+            redis:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+        networks:
+            - weather-network
+        restart: unless-stopped
+
+volumes:
+    postgres_data:
+    redis_data:
+
+networks:
+    weather-network:
+        driver: bridge
